@@ -209,9 +209,9 @@ def train_cnn(
     y_test_pred = predict(test_loader)
     all_labels = np.arange(len(class_names))
     if split_mode == "per_snr":
-        print("RadioML CNN evaluation: train/validation/test each contain samples from every SNR.")
+        print(f"CNN evaluation ({Path(dataset_path).stem}): train/validation/test each contain samples from every SNR.")
     else:
-        print("RadioML CNN evaluation: final test uses SNR levels excluded from training.")
+        print(f"CNN evaluation ({Path(dataset_path).stem}): final test uses SNR levels excluded from training.")
         print(f"Held-out SNR levels (excluded from training): {heldout}")
     print("Seen-SNR validation report:")
     print(classification_report(y[validation_idx], y_val_pred, labels=all_labels,
@@ -237,7 +237,7 @@ def train_cnn(
         "state_dict": best_state,
         "class_names": class_names,
         "input_format": "float32 I/Q channels, per-window shared RMS normalized, shape (batch, 2, samples)",
-        "training_data_kind": "RadioML2016.10A",
+        "training_data_kind": Path(dataset_path).stem,
         "architecture": "IQResidualCNN-v2",
         "split_mode": split_mode,
         "heldout_snrs_db": heldout if split_mode == "snr_holdout" else [],

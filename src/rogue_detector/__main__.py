@@ -14,6 +14,7 @@ from sklearn.model_selection import train_test_split
 
 from rogue_detector.features import extract_features
 from rogue_detector.cnn import train_cnn
+from rogue_detector.deeprfsoc import benchmark_deeprfsoc, inspect_deeprfsoc, import_deeprfsoc, train_deeprfsoc
 from rogue_detector.synthetic import CLASS_NAMES, DEFAULT_SAMPLE_RATE_HZ, generate_dataset
 
 
@@ -77,6 +78,55 @@ def _import_radioml(args: argparse.Namespace) -> None:
     output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(f"Imported {labels.size} IQ windows with {len(class_names)} modulation classes to {output}")
     print(f"Classes: {', '.join(class_names)}")
+
+
+def _import_radiomod16(args: argparse.Namespace) -> None:
+    """Convert the public RadioMod-R16 HDF5 arrays into the project's NPZ layout."""
+    try:
+        import h5py
+    except ImportError as error:
+        raise SystemExit("Install the dataset reader with `python -m pip install -e .[datasets]`.") from error
+
+    source = Path(args.input)
+    requested = {name.strip().upper() for name in args.modulations.split(",") if name.strip()}
+    with h5py.File(source, "r") as dataset:
+        iq_values = dataset["X"][:]
+        one_hot = dataset["Y"][:]
+        snr_db = dataset["Z"][:].astype(np.int16)
+    if iq_values.ndim != 3 or iq_values.shape[1:] != (512, 2) or one_hot.ndim != 2:
+        raise SystemExit(f"Unexpected RadioMod-R16 array shapes: X={iq_values.shape}, Y={one_hot.shape}")
+
+    all_names = ["BPSK", "QPSK", "8PSK", "OQPSK", "DQPSK", "PI4QPSK", "16QAM", "32QAM",
+                 "64QAM", "16APSK", "2FSK", "4FSK", "MSK", "CPFSK", "GMSK", "GFSK"]
+    if one_hot.shape[1] != len(all_names):
+        raise SystemExit(f"Unexpected RadioMod-R16 class count: {one_hot.shape[1]}")
+    ids = one_hot.argmax(axis=1)
+    labels_all = np.asarray(all_names)[ids]
+    selected_mask = np.isin(labels_all, sorted(requested))
+    if not selected_mask.any():
+        raise SystemExit(f"No requested modulation classes found: {sorted(requested)}")
+
+    iq_selected = iq_values[selected_mask]
+    iq = (iq_selected[:, :, 0] + 1j * iq_selected[:, :, 1]).astype(np.complex64)
+    labels = labels_all[selected_mask]
+    snr_db = snr_db[selected_mask]
+    rng = np.random.default_rng(args.seed)
+    permutation = rng.permutation(labels.size)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(output, iq=iq[permutation], labels=labels[permutation], snr_db=snr_db[permutation])
+    metadata = {
+        "dataset_kind": "RadioMod-R16",
+        "source_url": "https://zenodo.org/records/19045423",
+        "license": "CC BY 4.0",
+        "class_names": sorted(np.unique(labels).tolist()),
+        "examples": int(labels.size),
+        "samples_per_window": int(iq.shape[1]),
+        "snr_db_values": sorted(int(value) for value in np.unique(snr_db)),
+        "limitations": "Simulated modulation-recognition data with channel impairments; not N78-specific and has no rogue/legitimate transmitter labels.",
+    }
+    output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    print(f"Imported {labels.size} RadioMod-R16 windows, classes={metadata['class_names']}, to {output}")
 
 
 def _train_radioml(args: argparse.Namespace) -> None:
@@ -213,6 +263,36 @@ def _train_cnn(args: argparse.Namespace) -> None:
     )
 
 
+def _inspect_deeprfsoc(args: argparse.Namespace) -> None:
+    inspect_deeprfsoc(args.input)
+
+
+def _import_deeprfsoc(args: argparse.Namespace) -> None:
+    import_deeprfsoc(args.input, args.output_dir, seed=args.seed,
+                      chunk_windows=args.chunk_windows, split_group_windows=args.split_group_windows)
+
+
+def _train_deeprfsoc(args: argparse.Namespace) -> None:
+    train_deeprfsoc(
+        args.dataset_dir, args.model, args.metrics,
+        epochs=args.epochs, batch_size=args.batch_size, patience=args.patience,
+        seed=args.seed, max_train_per_cell=args.max_train_per_cell,
+        max_eval_per_cell=args.max_eval_per_cell,
+        resume_from=args.resume_from, latest_checkpoint_path=args.latest_checkpoint,
+        device_name=args.device, precision=args.precision,
+    )
+
+
+def _benchmark_deeprfsoc(args: argparse.Namespace) -> None:
+    batch_sizes = tuple(int(value.strip()) for value in args.batch_sizes.split(",") if value.strip())
+    report = benchmark_deeprfsoc(args.dataset_dir, batches=args.batches, seed=args.seed,
+                                 batch_sizes=batch_sizes)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(f"Saved benchmark: {output}", flush=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rogue-detector")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -232,6 +312,57 @@ def build_parser() -> argparse.ArgumentParser:
     import_data.add_argument("--max-per-class-snr", type=int, default=0, help="limit examples per modulation and SNR cell; 0 keeps all")
     import_data.add_argument("--seed", type=int, default=7)
     import_data.set_defaults(run=_import_radioml)
+
+    import_r16 = commands.add_parser("import-radiomod-r16", help="convert RadioMod-R16 HDF5 into project NPZ format")
+    import_r16.add_argument("--input", default="data/raw/RadioMod-R16_dataset.h5")
+    import_r16.add_argument("--output", default="data/processed/radiomod_r16.npz")
+    import_r16.add_argument("--modulations", default="BPSK,QPSK,8PSK",
+                            help="comma-separated subset; defaults to the three classes shared with the RadioML run")
+    import_r16.add_argument("--seed", type=int, default=7)
+    import_r16.set_defaults(run=_import_radiomod16)
+
+    inspect_deep = commands.add_parser("inspect-deeprfsoc", help="inspect the trusted DeepRFSoC pickle structure")
+    inspect_deep.add_argument("--input", default="data/raw/deeprfsoc_rfsoc_quant_amc/deeprfsoc.pkl")
+    inspect_deep.set_defaults(run=_inspect_deeprfsoc)
+
+    import_deep = commands.add_parser("import-deeprfsoc", help="memory-map all valid DeepRFSoC windows into processed arrays")
+    import_deep.add_argument("--input", default="data/raw/deeprfsoc_rfsoc_quant_amc/deeprfsoc.pkl")
+    import_deep.add_argument("--output-dir", default="data/processed/deeprfsoc")
+    import_deep.add_argument("--chunk-windows", type=int, default=2048)
+    import_deep.add_argument("--split-group-windows", type=int, default=512,
+                             help="contiguous windows kept together when making class/SNR-stratified splits")
+    import_deep.add_argument("--seed", type=int, default=7)
+    import_deep.set_defaults(run=_import_deeprfsoc)
+
+    train_deep = commands.add_parser("train-deeprfsoc", help="train and evaluate the 1D CNN on DeepRFSoC")
+    train_deep.add_argument("--dataset-dir", default="data/processed/deeprfsoc")
+    train_deep.add_argument("--model", default="models/deeprfsoc_1d_cnn.pt")
+    train_deep.add_argument("--metrics", default="outputs/deeprfsoc/metrics.json")
+    train_deep.add_argument("--epochs", type=int, default=20)
+    train_deep.add_argument("--batch-size", type=int, default=512)
+    train_deep.add_argument("--patience", type=int, default=5)
+    train_deep.add_argument("--seed", type=int, default=7)
+    train_deep.add_argument("--max-train-per-cell", type=int, default=0,
+                            help="smoke-test cap per class/SNR cell; 0 uses all training windows")
+    train_deep.add_argument("--max-eval-per-cell", type=int, default=0,
+                            help="smoke-test cap per class/SNR cell for validation and test; 0 uses all")
+    train_deep.add_argument("--resume-from", default=None, help="resume from a latest checkpoint saved by this command")
+    train_deep.add_argument("--latest-checkpoint", default="models/deeprfsoc_latest.pt",
+                            help="save resumable optimizer state after every epoch")
+    train_deep.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    train_deep.add_argument("--precision", choices=("auto", "amp", "fp32"), default="auto",
+                            help="auto enables CUDA AMP; benchmark before selecting fp32 for speed")
+    train_deep.set_defaults(run=_train_deeprfsoc)
+
+    benchmark_deep = commands.add_parser("benchmark-deeprfsoc", help="benchmark DeepRFSoC memmap-to-CNN throughput")
+    benchmark_deep.add_argument("--dataset-dir", default="data/processed/deeprfsoc")
+    benchmark_deep.add_argument("--batches", type=int, default=40, help="timed batches per batch-size/precision configuration")
+    benchmark_deep.add_argument("--seed", type=int, default=7)
+    benchmark_deep.add_argument("--batch-sizes", default="64,128,256,384,512,768,1024,1536,2048",
+                                help="comma-separated batch sizes")
+    benchmark_deep.add_argument("--output", default="outputs/deeprfsoc/benchmark.json")
+    benchmark_deep.set_defaults(run=_benchmark_deeprfsoc)
+    benchmark_deep.set_defaults(run=_benchmark_deeprfsoc)
 
     train_radio = commands.add_parser("train-radioml", help="train/evaluate the feature baseline on imported RadioML")
     train_radio.add_argument("--dataset", default="data/processed/radioml2016_10a.npz")
