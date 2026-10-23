@@ -124,6 +124,31 @@ Run on the full 30,000-window three-class import:
 
 The SNR holdout is a deliberately harder test: it measures performance at exact SNR levels the model did not train on. Use `--heldout-snrs` to select a different set of held-out SNR values, and keep those values fixed while comparing model changes.
 
+## OAI 5G PLKG N78 dataset audit
+
+The OAI 5G PLKG Paired Dataset is cloned under `data/raw/oai_5g_plkg/` from [Hugging Face](https://huggingface.co/datasets/ahancock516/oai-5g-plkg-dataset). The `inspect-plkg` command streams through binary record headers and summarizes paired HDF5 files without loading the complete dataset into RAM:
+
+```powershell
+.venv-cnn\Scripts\python.exe -m rogue_detector inspect-plkg --input-root data/raw/oai_5g_plkg --output outputs/plkg/inspection.json
+```
+
+The local snapshot contains 27,141 PUSCH and 83,838 PDSCH records, plus 10,620 paired HDF5 entries. IQ payloads are variable-sized frequency-domain resource-element grids stored as interleaved little-endian int16 I/Q, with channel-estimate blocks; they are not full-band ADC recordings. Every observed PUSCH/PDSCH record is QPSK (Qm=2). The available files do not provide noise/non-NR or rogue/authorized classes, SNR labels, or a precise RF center frequency/sample rate for each campaign. The published campaign metadata identifies n78 and PCI 1, but that does not establish that every capture lies in the project’s narrower 3.3–3.7 GHz interval.
+
+This dataset is useful as NR positive/profile data and to inspect PDSCH/PUSCH resource-grid structure. By itself it cannot train or validate a supervised NR-versus-background detector, a multi-modulation classifier, or a legitimate-versus-rogue classifier. The inventory found 284 nonempty PDSCH episodes and 24 empty episode files. The full local inventory and limitation assessment are saved in `outputs/plkg/inspection.json`.
+
+The current exploratory model is a one-class Isolation Forest profile over 26 compact IQ/channel-estimate features. It uses PDSCH only, with campaign-stratified episode splits to keep each episode wholly in train, validation, or test. The split allocated 58,659 records to training, 7,744 to validation, and 17,435 to held-out known-NR testing. The forest fit a balanced 16,384-record sample drawn from the training split, with 4,096 examples from each campaign. At a 95th-percentile validation threshold, its held-out known-profile false-alert rate was 2.11% overall; campaign 3 was 7.82%, and campaign 4 was 8.96%. These rates are not rogue-detection recall or accuracy: no rogue/non-NR examples are present. A separate campaign-shift smoke run trained on campaigns 1–2 and flagged all campaign 3–4 examples, showing the model does not transfer across unseen campaign conditions.
+
+Reproduce the import and profile run:
+
+```powershell
+python -m pip install -e ".[datasets]"
+.venv-cnn\Scripts\python.exe -u -m rogue_detector inspect-plkg --input-root data/raw/oai_5g_plkg --output outputs/plkg/inspection.json
+.venv-cnn\Scripts\python.exe -u -m rogue_detector import-plkg --input-root data/raw/oai_5g_plkg --output-dir data/processed/plkg 2>&1 | Tee-Object -FilePath outputs/plkg/import.log
+.venv-cnn\Scripts\python.exe -u -m rogue_detector train-plkg-profile --dataset-dir data/processed/plkg --model models/plkg_pdsch_profile.joblib --metrics outputs/plkg/profile_metrics.json --seed 7 --n-estimators 250 --validation-percentile 95 2>&1 | Tee-Object -FilePath outputs/plkg/profile_training.log
+```
+
+The report, logs, processed features, model, and metrics are saved under `outputs/plkg/`, `data/processed/plkg/`, and `models/` respectively. `h5py` is required for inspection; install it with `python -m pip install -e ".[datasets]"` if the inspection command reports it missing.
+
 ## Planned development path
 
 1. Synthetic IQ generation, feature extraction, and baseline evaluation.

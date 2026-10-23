@@ -15,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from rogue_detector.features import extract_features
 from rogue_detector.cnn import train_cnn
 from rogue_detector.deeprfsoc import benchmark_deeprfsoc, inspect_deeprfsoc, import_deeprfsoc, train_deeprfsoc
+from rogue_detector.plkg import import_plkg_profile, inspect_plkg, train_plkg_profile
 from rogue_detector.synthetic import CLASS_NAMES, DEFAULT_SAMPLE_RATE_HZ, generate_dataset
 
 
@@ -293,9 +294,64 @@ def _benchmark_deeprfsoc(args: argparse.Namespace) -> None:
     print(f"Saved benchmark: {output}", flush=True)
 
 
+def _inspect_plkg(args: argparse.Namespace) -> None:
+    report = inspect_plkg(args.input_root, output_path=args.output)
+    print(json.dumps({
+        "dataset": report["dataset"],
+        "source_file_count_excluding_git_metadata": report["source_file_count_excluding_git_metadata"],
+        "source_bytes_excluding_git_metadata": report["source_bytes_excluding_git_metadata"],
+        "pusch_records": report["pusch"]["records"],
+        "pdsch_records": report["pdsch"]["records"],
+        "pusch_qam_classes": report["pusch"]["qam_class_counts"],
+        "pdsch_qam_classes": report["pdsch"]["qam_class_counts"],
+        "paired_hdf5": [{"file": Path(item["path"]).name, "pairs": item["pairs"]}
+                         for item in report["paired_hdf5"]],
+        "inspection_report": str(Path(args.output).resolve()),
+        "training_assessment": report["model_training_assessment"]["recommendation"],
+    }, indent=2), flush=True)
+
+
+def _import_plkg(args: argparse.Namespace) -> None:
+    result = import_plkg_profile(args.input_root, args.output_dir)
+    print(json.dumps(result, indent=2), flush=True)
+
+
+def _train_plkg_profile(args: argparse.Namespace) -> None:
+    train_plkg_profile(
+        args.dataset_dir,
+        args.model,
+        args.metrics,
+        seed=args.seed,
+        n_estimators=args.n_estimators,
+        validation_percentile=args.validation_percentile,
+        smoke_max_records_per_split=args.smoke_max_records_per_split,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rogue-detector")
     commands = parser.add_subparsers(dest="command", required=True)
+
+    inspect_plkg_cmd = commands.add_parser("inspect-plkg", help="inspect OAI 5G PLKG raw PUSCH/PDSCH captures")
+    inspect_plkg_cmd.add_argument("--input-root", default="data/raw/oai_5g_plkg")
+    inspect_plkg_cmd.add_argument("--output", default="outputs/plkg/inspection.json")
+    inspect_plkg_cmd.set_defaults(run=_inspect_plkg)
+
+    import_plkg_cmd = commands.add_parser("import-plkg", help="build compact PDSCH profile features from PLKG records")
+    import_plkg_cmd.add_argument("--input-root", default="data/raw/oai_5g_plkg")
+    import_plkg_cmd.add_argument("--output-dir", default="data/processed/plkg")
+    import_plkg_cmd.set_defaults(run=_import_plkg)
+
+    train_plkg_cmd = commands.add_parser("train-plkg-profile", help="fit an exploratory one-class PDSCH profile model")
+    train_plkg_cmd.add_argument("--dataset-dir", default="data/processed/plkg")
+    train_plkg_cmd.add_argument("--model", default="models/plkg_pdsch_profile.joblib")
+    train_plkg_cmd.add_argument("--metrics", default="outputs/plkg/profile_metrics.json")
+    train_plkg_cmd.add_argument("--seed", type=int, default=7)
+    train_plkg_cmd.add_argument("--n-estimators", type=int, default=250)
+    train_plkg_cmd.add_argument("--validation-percentile", type=float, default=95.0)
+    train_plkg_cmd.add_argument("--smoke-max-records-per-split", type=int, default=0,
+                                help="cap train/validation/test records for a quick smoke run; 0 uses all")
+    train_plkg_cmd.set_defaults(run=_train_plkg_profile)
 
     generate = commands.add_parser("generate", help="generate labelled synthetic IQ windows")
     generate.add_argument("--examples", type=int, default=250, help="examples per class (default: 250)")
